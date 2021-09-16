@@ -1,0 +1,166 @@
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: traefik-ingress-controller
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - endpoints
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - extensions
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+
+---
+
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: traefik-ingress-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: traefik-ingress-controller
+subjects:
+- kind: ServiceAccount
+  name: traefik-ingress-controller
+  namespace: core
+
+---
+
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: traefik-ingress-controller
+  namespace: core
+
+---
+
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: traefik-conf
+  namespace: core
+data:
+  traefik.toml: |
+    # traefik.toml
+    defaultEntryPoints = ["http","https"]
+    [entryPoints]
+      [entryPoints.http]
+      address = ":80"
+      [entryPoints.http.redirect]
+      entryPoint = "https"
+      [entryPoints.https]
+      address = ":443"
+      [entryPoints.https.tls]
+    [acme]
+    email = "user@domain.tld"
+    storageFile = "/acme/acme.json"
+    entryPoint = "https"
+    onDemand = false
+    onHostRule = true
+    [acme.httpChallenge]
+    entryPoint = "http"
+    [traefikLog]
+    filePath = "/traefik.log"
+    format   = "json"
+    [accessLog]
+    filePath = "/access.log"
+
+---
+
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: traefik-ingress-controller
+  namespace: core
+  labels:
+    k8s-app: traefik-ingress-lb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      k8s-app: traefik-ingress-lb
+  template:
+    metadata:
+      labels:
+        k8s-app: traefik-ingress-lb
+        name: traefik-ingress-lb
+    spec:
+      serviceAccountName: traefik-ingress-controller
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: config
+          configMap:
+            name: traefik-conf
+        - name: acme
+          hostPath:
+            type: "FileOrCreate"
+            path: /cluster/core/webproxy/acme.json
+        - name: log
+          hostPath:
+            type: "FileOrCreate"
+            path: /cluster/core/webproxy/traefik.log
+        - name: accesslog
+          hostPath:
+            type: "FileOrCreate"
+            path: /cluster/storage/core/webproxy/access.log
+      nodeSelector:
+        nodetype: master
+      containers:
+      - image: traefik:1.7.24
+        name: traefik-ingress-lb
+        volumeMounts:
+        - mountPath: "/config"
+          name: "config"
+        - mountPath: "/acme/acme.json"
+          name: "acme"
+        - mountPath: "/traefik.log"
+          name: "log"
+        - mountPath: "/access.log"
+          name: "accesslog"
+        ports:
+        - name: http
+          containerPort: 80
+        - name: https
+          containerPort: 443
+        args:
+        - --configfile=/config/traefik.toml
+        - --api
+        - --kubernetes
+        - --logLevel=INFO
+
+---
+
+kind: Service
+apiVersion: v1
+metadata:
+  name: traefik-ingress-service
+  namespace: core
+spec:
+  selector:
+    k8s-app: traefik-ingress-lb
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+      nodePort: 80
+      name: http
+    - protocol: TCP
+      port: 443
+      targetPort: 443
+      nodePort: 443
+      name: https
+  type: NodePort
+  externalTrafficPolicy: Local
